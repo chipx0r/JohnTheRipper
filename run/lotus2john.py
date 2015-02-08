@@ -17,6 +17,7 @@ import os
 import struct
 from binascii import hexlify
 
+
 def process_file(filename):
     dataSize = os.path.getsize(filename)
     if dataSize < 0xD8:
@@ -42,9 +43,13 @@ def process_file(filename):
     if wUserBlobSize + 0xD8 > dataSize:
         assert 0
 
+    algorithm = 1  # 64-bit RC2, XXX how do we find this?
+
     # read blob of size wUserBlobSize
-    sys.stdout.write("%s:%s\n" % (os.path. basename(filename),
-        hexlify(f.read(wUserBlobSize)).decode("ascii").upper()))
+    sys.stdout.write("%s:%s$%d\n" % (
+        os.path.basename(filename),
+        hexlify(f.read(wUserBlobSize)).decode("ascii").upper(),
+        algorithm))
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

@@ -56,7 +56,16 @@ static int omp_t = 1;
 /* Globals */
 static const char LOTUS85_UNIQUE_STRING[] = "Lotus Notes Password Pad Uniquifier";
 
-static uint8_t ebits_to_num[256]=
+static void print_hex(unsigned char *str, int len)
+{
+	int i;
+	for (i = 0; i < len; ++i)
+		printf("%02x", str[i]);
+	printf("\n");
+}
+
+
+static uint8_t ebits_to_num[256] =  // Called PISUBST in libnotes.so (NOTES_9.0.1_LINUX_DI_EN.tar)
 {
 	0xbd, 0x56, 0xea, 0xf2, 0xa2, 0xf1, 0xac, 0x2a,
 	0xb0, 0x93, 0xd1, 0x9c, 0x1b, 0x33, 0xfd, 0xd0,
@@ -95,6 +104,7 @@ static uint8_t ebits_to_num[256]=
 static struct custom_salt {
 	uint8_t lotus85_user_blob[LOTUS85_MAX_BLOB_SIZE];
 	uint32_t lotus85_user_blob_len;
+	int algorithm;
 } *cur_salt;
 
 /*
@@ -118,7 +128,14 @@ static void decipher_userid_blob(uint8_t *ciphered_blob, uint32_t len, uint8_t *
 	memset(buf, 0x0, sizeof(buf));
 	memset(rc_iv, 0, sizeof(rc_iv));
 
-	RC2_set_key(&rc_key, 8, userid_key, 64);
+	print_hex(userid_key, 8);
+	print_hex(ciphered_blob, len);
+
+	if (cur_salt->algorithm == 0) {
+		RC2_set_key(&rc_key, 8, userid_key, 64);
+	} else if (cur_salt->algorithm == 1) { // 128-bit RC2
+		RC2_set_key(&rc_key, 16, userid_key, 128);
+	}
 	RC2_cbc_encrypt(ciphered_blob, buf, len, &rc_key, rc_iv, RC2_DECRYPT);
 
 	memcpy(deciphered_blob, buf, len);
@@ -318,8 +335,17 @@ static void done(void)
 static int lotus85_valid(char *ciphertext,struct fmt_main *self)
 {
 	int len, extra;
+	char *p;
 
 	len = strnlen(ciphertext, CIPHERTEXT_LENGTH + 1);
+	p = strrchr(ciphertext, '$');
+
+	/* handle different algorithm types */
+	if (p) {
+		len = p - ciphertext;
+		if (strlen(p) != 2)
+			return 0;
+	}
 
 	if (len % 2)
 		return 0;
@@ -330,7 +356,7 @@ static int lotus85_valid(char *ciphertext,struct fmt_main *self)
 	if ((len >> 1) < LOTUS85_MIN_BLOB_SIZE)
 		return 0;
 
-	if (hexlenu(ciphertext, &extra)  != len || extra)
+	if (hexlenu(ciphertext, &extra) != len || extra)
 		return 0;
 
 	return 1;
@@ -338,15 +364,24 @@ static int lotus85_valid(char *ciphertext,struct fmt_main *self)
 
 static void *get_salt(char *ciphertext)
 {
-	int i,len;
+	int i, len;
 	static struct custom_salt cs;
+	char *p;
 
+	cs.algorithm = 0; // 64-bit RC2 is the default
 	len = strlen(ciphertext) >> 1;
 
 	for (i = 0; i < len; i++)
 		cs.lotus85_user_blob[i] = (atoi16[ARCH_INDEX(ciphertext[i << 1])] << 4) + atoi16[ARCH_INDEX(ciphertext[(i << 1) + 1])];
 
 	cs.lotus85_user_blob_len = len;
+
+	/* handle different algorithm types */
+	p = strrchr(ciphertext, '$');
+	if (p) {
+		cs.algorithm = atoi(p+1);
+		puts("XXX");
+	}
 
 	return (void*)&cs;
 }
