@@ -26,10 +26,14 @@ HISTORY. Original author(s) and license unknown.
 
 */
 
+// Credits also goes to the unknown author who improved racf-debug.c and created racf-debug-cleanup.c, thanks!
+
 /**
  * Parse RACF profiles
  *
  * http://publib.boulder.ibm.com/infocenter/zos/v1r13/index.jsp?topic=%2Fcom.ibm.zos.r13.ichb200%2Fichzb2c030.htm
+ * https://www.ibm.com/support/knowledgecenter/SSLTBW_1.13.0/com.ibm.zos.r13.ichb200/ichzb2c030.htm (Format of the RACF database)
+ *
  * The profiles, or entity records, contain the actual descriptions of the attributes and authorities for every entity (users, groups, DASD data sets, and resource classes defined in the class descriptor table) defined to RACF®. The number in the entry-type field identifies the type of profile and corresponds to the number of the template that maps this type of profile.
  *
  */
@@ -535,11 +539,15 @@ int parse_profile_chunk(unsigned char *origin, int nlen, struct profile *profile
 			break;
 
 		case CLASS_HASH:
-			printf("  [0x%02x] %s: DES hash '$racf$*%s*", field_id,
+			/* printf("  [0x%02x] %s: DES hash '$racf$*%s*", field_id,
 			       profile->desc, username);
 			for (i = 0; i < field_length; i++)
 				printf("%02X", *ptr++);
-			printf("'\n");
+			printf("'\n"); */
+			printf("$racf$*%s*", username);
+			for (i = 0; i < field_length; i++)
+				printf("%02X", *ptr++);
+			printf("\n");
 			consumed += field_length;
 			break;
 
@@ -585,7 +593,7 @@ int parse_profile_chunk(unsigned char *origin, int nlen, struct profile *profile
 						if (field_id == 0x19
 						    && field_count == 2
 						    && j == 1)
-							printf("'$racf$*%s*",
+							printf("\n$racf$*%s*",
 							       username);
 
 						value = datalen;	/* isprintable */
@@ -603,7 +611,7 @@ int parse_profile_chunk(unsigned char *origin, int nlen, struct profile *profile
 						if (field_id == 0x19
 						    && field_count == 2
 						    && j == 1)
-							printf("'");
+							printf("");
 						else if (value)
 							printf(" '%s'", buf);
 
