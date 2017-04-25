@@ -333,6 +333,412 @@ static int print_hex(unsigned char *str, int len, char *cp)
 	return len*2;
 }
 
+/*
+ * Code for handling GnuPG 2.x "Private Key Format"
+ *
+ * Use "gpg --with-keygrip -K" to identify the .key file to attack. The
+ * "keygrip" associated with "ssb" (out of "ssb"/"sec" values) needs to be
+ * used.
+ *
+ * NOTE: A *.key file pair (main key and subkey) cannot be used by gpg2 if the
+ * corresponding public key is missing from the pubring.kbx file.
+ *
+ * Thanks to K_F (from #gnupg channel on freenode) for all the help.
+ */
+
+#define GPG_ERR_CORRUPTED_PROTECTION    106
+#define GPG_ERR_BAD_PASSPHRASE           11
+#define GPG_ERR_INV_SEXP                 83
+#define GPG_ERR_UNKNOWN_SEXP            104
+#define GPG_ERR_UNSUPPORTED_ALGORITHM    84
+#define GPG_ERR_UNSUPPORTED_PROTECTION  105
+#define GPG_ERR_NO_ERROR                  0
+#define GPG_ERR_SEXP_BAD_CHARACTER      205
+#define GPG_ERR_SEXP_ZERO_PREFIX        207
+#define GPG_ERR_SEXP_NESTED_DH          208
+#define GPG_ERR_SEXP_UNMATCHED_DH       209
+#define GPG_ERR_SEXP_UNEXPECTED_PUNC    210
+#define GPG_ERR_SEXP_INV_LEN_SPEC       201
+#define GPG_ERR_SEXP_STRING_TOO_LONG    202
+#define GPG_ERR_SEXP_UNMATCHED_PAREN    203
+#define GPG_ERR_SEXP_NOT_CANONICAL      204
+
+
+/* sexp-parse.h - S-expression helper functions
+ * Copyright (C) 2002, 2003, 2007 Free Software Foundation, Inc.
+ *
+ * Licensed under GPLv3 or GPLv2.
+ */
+
+/* Return the length of the next S-Exp part and update the pointer to
+   the first data byte.  0 is returned on error */
+static size_t snext(unsigned char const **buf)
+{
+	const unsigned char *s;
+	int n;
+
+	s = *buf;
+	for (n = 0; *s && *s != ':' && (*s >= '0' && *s <= '9'); s++)
+		n = n*10 + (*s - '0');
+	if (!n || *s != ':')
+		return 0; /* we don't allow empty lengths */
+	*buf = s+1;
+	return n;
+}
+
+/* Skip over the S-Expression BUF points to and update BUF to point to
+   the character right behind.  DEPTH gives the initial number of open
+   lists and may be passed as a positive number to skip over the
+   remainder of an S-Expression if the current position is somewhere
+   in an S-Expression.  The function may return an error code if it
+   encounters an impossible condition.  */
+static int sskip(unsigned char const **buf, int *depth)
+{
+	const unsigned char *s = *buf;
+	size_t n;
+	int d = *depth;
+
+	while (d > 0) {
+		if (*s == '(') {
+			d++;
+			s++;
+		} else if (*s == ')') {
+			d--;
+			s++;
+		} else {
+			if (!d)
+				return 45; // GPG_ERR_INV_SEXP
+			n = snext (&s);
+			if (!n)
+				return 45; // GPG_ERR_INV_SEXP;
+			s += n;
+		}
+	}
+	*buf = s;
+	*depth = d;
+	return 0;
+}
+
+
+/* Check whether the the string at the address BUF points to matches
+   the token.  Return true on match and update BUF to point behind the
+   token.  Return false and do not update the buffer if it does not
+   match. */
+static int smatch(unsigned char const **buf, size_t buflen, const char *token)
+{
+	size_t toklen = strlen (token);
+
+	if (buflen != toklen || memcmp (*buf, token, toklen))
+		return 0;
+	*buf += toklen;
+	return 1;
+}
+
+/* protect.c - Un/Protect a secret key
+ * Copyright (C) 1998-2003, 2007, 2009, 2011 Free Software Foundation, Inc.
+ * Copyright (C) 1998-2003, 2007, 2009, 2011, 2013-2015 Werner Koch
+ *
+ * This file is part of GnuPG.
+ *
+ * Licensed under GPLv3.
+ */
+
+#define DIM(v)             (sizeof(v)/sizeof((v)[0]))
+
+/* The protection mode for encryption.  The supported modes for
+   decryption are listed in agent_unprotect().  */
+#define PROT_CIPHER        GCRY_CIPHER_AES128
+#define PROT_CIPHER_STRING "aes"
+#define PROT_CIPHER_KEYLEN (128/8)
+
+/* A table containing the information needed to create a protected
+   private key.  */
+static struct {
+	const char *algo;
+	const char *parmlist;
+	int prot_from, prot_to;
+	int ecc_hack;
+} protect_info[] = {
+	{ "rsa",  "nedpqu", 2, 5 },
+	{ "dsa",  "pqgyx", 4, 4 },
+	{ "elg",  "pgyx", 3, 3 },
+	{ "ecdsa","pabgnqd", 6, 6, 1 },
+	{ "ecdh", "pabgnqd", 6, 6, 1 },
+	{ "ecc",  "pabgnqd", 6, 6, 1 },
+	{ NULL }
+};
+
+#define OCB_MODE_SUPPORTED 0
+
+/* Do the actual decryption and check the return list for consistency.  */
+int do_decryption_hacked(const unsigned char *aad_begin, size_t aad_len, const
+		unsigned char *aadhole_begin, size_t aadhole_len, const
+		unsigned char *protected, size_t protectedlen, const unsigned
+		char *s2ksalt, unsigned long s2kcount, const unsigned char *iv,
+		size_t ivlen, int prot_cipher, int prot_cipher_keylen, int
+		is_ocb, unsigned char **result)
+{
+	int rc = 0;
+	int blklen;
+	unsigned char *outbuf;
+	size_t reallen;
+
+	if (is_ocb && !OCB_MODE_SUPPORTED)
+		return (GPG_ERR_UNSUPPORTED_PROTECTION);
+
+	blklen = 16; // bad hack
+
+	if (is_ocb) {
+		/* OCB does not require a multiple of the block length but we
+		 * check that it is long enough for the 128 bit tag and that we
+		 * have the 96 bit nonce.  */
+		if (protectedlen < (4 + 16) || ivlen != 12)
+			return (GPG_ERR_CORRUPTED_PROTECTION);
+	} else {
+		if (protectedlen < 4 || (protectedlen%blklen))
+			return (GPG_ERR_CORRUPTED_PROTECTION);
+	}
+
+	if (!outbuf)
+		rc = -99; // out_of_core ();
+
+	// print hash here XXX
+	printf("%d\n", protectedlen);
+	puts(protected);
+
+	*result = outbuf;
+	return 0;
+}
+
+#define GCRY_CIPHER_AES128 7
+#define GCRY_CIPHER_AES256 9
+
+/* Unprotect the key encoded in canonical format.  We assume a valid
+   S-Exp here.  If a protected-at item is available, its value will
+   be stored at protected_at unless this is NULL.  */
+int agent_unprotect_parser(const unsigned char *protectedkey)
+{
+	static struct {
+		const char *name; /* Name of the protection method. */
+		int algo;         /* (A zero indicates the "openpgp-native" hack.)  */
+		int keylen;       /* Used key length in bytes.  */
+		unsigned int is_ocb:1;
+	} algotable[] = {
+		{ "openpgp-s2k3-sha1-aes-cbc",    GCRY_CIPHER_AES128, (128/8)},
+		{ "openpgp-s2k3-sha1-aes256-cbc", GCRY_CIPHER_AES256, (256/8)},
+		{ "openpgp-s2k3-ocb-aes",         GCRY_CIPHER_AES128, (128/8), 1},
+		{ "openpgp-native", 0, 0 }
+	};
+	int rc;
+	const unsigned char *s;
+	const unsigned char *protect_list;
+	size_t n;
+	int infidx, i;
+	const unsigned char *s2ksalt;
+	unsigned long s2kcount;
+	const unsigned char *iv;
+	int prot_cipher, prot_cipher_keylen;
+	int is_ocb;
+	const unsigned char *aad_begin, *aad_end, *aadhole_begin, *aadhole_end;
+	const unsigned char *prot_begin;
+	unsigned char *cleartext;
+	int *protected_at = NULL; // fake
+
+	if (protected_at)
+		*protected_at = 0;
+
+	s = protectedkey;
+	if (*s != '(')
+		return (GPG_ERR_INV_SEXP);
+	s++;
+	n = snext (&s);
+	if (!n)
+		return (GPG_ERR_INV_SEXP);
+	if (!smatch (&s, n, "protected-private-key"))
+		return (GPG_ERR_UNKNOWN_SEXP);
+	if (*s != '(')
+		return (GPG_ERR_UNKNOWN_SEXP);
+	{
+		aad_begin = aad_end = s;
+		aad_end++;
+		i = 1;
+		rc = sskip (&aad_end, &i);
+		if (rc)
+			return rc;
+	}
+
+	s++;
+	n = snext (&s);
+	if (!n)
+		return (GPG_ERR_INV_SEXP);
+
+	for (infidx=0; protect_info[infidx].algo
+			&& !smatch (&s, n, protect_info[infidx].algo); infidx++)
+		;
+	if (!protect_info[infidx].algo)
+		return (GPG_ERR_UNSUPPORTED_ALGORITHM);
+
+	/* See wether we have a protected-at timestamp.  */
+	protect_list = s;  /* Save for later.  */
+	if (protected_at) {
+		while (*s == '(') {
+			prot_begin = s;
+			s++;
+			n = snext (&s);
+			if (!n)
+				return (GPG_ERR_INV_SEXP);
+			if (smatch (&s, n, "protected-at")) {
+				n = snext (&s);
+				if (!n)
+					return (GPG_ERR_INV_SEXP);
+				if (n != 15)
+					return (GPG_ERR_UNKNOWN_SEXP);
+				memcpy (protected_at, s, 15);
+				protected_at[15] = 0;
+				break;
+			}
+			s += n;
+			i = 1;
+			rc = sskip (&s, &i);
+			if (rc)
+				return rc;
+		}
+	}
+
+	/* Now find the list with the protected information.  Here is an
+	   example for such a list:
+	   (protected openpgp-s2k3-sha1-aes-cbc
+	   ((sha1 <salt> <count>) <Initialization_Vector>)
+	   <encrypted_data>)
+	   */
+	s = protect_list;
+	for (;;) {
+		if (*s != '(')
+			return (GPG_ERR_INV_SEXP);
+		prot_begin = s;
+		s++;
+		n = snext (&s);
+		if (!n)
+			return (GPG_ERR_INV_SEXP);
+		if (smatch (&s, n, "protected"))
+			break;
+		s += n;
+		i = 1;
+		rc = sskip (&s, &i);
+		if (rc)
+			return rc;
+	}
+	/* found */
+	{
+		aadhole_begin = aadhole_end = prot_begin;
+		aadhole_end++;
+		i = 1;
+		rc = sskip (&aadhole_end, &i);
+		if (rc)
+			return rc;
+	}
+	n = snext (&s);
+	if (!n)
+		return (GPG_ERR_INV_SEXP);
+
+	/* Lookup the protection algo.  */
+	prot_cipher = 0;        /* (avoid gcc warning) */
+	prot_cipher_keylen = 0; /* (avoid gcc warning) */
+	is_ocb = 0;
+	for (i = 0; i < DIM (algotable); i++)
+		if (smatch (&s, n, algotable[i].name)) {
+			prot_cipher = algotable[i].algo;
+			prot_cipher_keylen = algotable[i].keylen;
+			is_ocb = algotable[i].is_ocb;
+			break;
+		}
+	if (i == DIM (algotable)
+			|| (is_ocb && !OCB_MODE_SUPPORTED))
+		return (GPG_ERR_UNSUPPORTED_PROTECTION);
+
+	if (!prot_cipher) {  /* This is "openpgp-native".  */ // not supported by JtR
+		fprintf(stderr, "openpgp-native protection cipher is not supported!\n");
+		return;
+	}
+
+	if (*s != '(' || s[1] != '(')
+		return (GPG_ERR_INV_SEXP);
+	s += 2;
+	n = snext (&s);
+	if (!n)
+		return (GPG_ERR_INV_SEXP);
+	if (!smatch (&s, n, "sha1"))
+		return (GPG_ERR_UNSUPPORTED_PROTECTION);
+	n = snext (&s);
+	if (n != 8)
+		return (GPG_ERR_CORRUPTED_PROTECTION);
+	s2ksalt = s;
+	s += n;
+	n = snext (&s);
+	if (!n)
+		return (GPG_ERR_CORRUPTED_PROTECTION);
+	/* We expect a list close as next, so we can simply use strtoul()
+	   here.  We might want to check that we only have digits - but this
+	   is nothing we should worry about */
+	if (s[n] != ')' )
+		return (GPG_ERR_INV_SEXP);
+
+	/* Old versions of gpg-agent used the funny floating point number in
+	   a byte encoding as specified by OpenPGP.  However this is not
+	   needed and thus we now store it as a plain unsigned integer.  We
+	   can easily distinguish the old format by looking at its value:
+	   Less than 256 is an old-style encoded number; other values are
+	   plain integers.  In any case we check that they are at least
+	   65536 because we never used a lower value in the past and we
+	   should have a lower limit.  */
+	s2kcount = strtoul ((const char*)s, NULL, 10);
+	if (!s2kcount)
+		return (GPG_ERR_CORRUPTED_PROTECTION);
+	if (s2kcount < 256)
+		s2kcount = (16ul + (s2kcount & 15)) << ((s2kcount >> 4) + 6);
+	if (s2kcount < 65536)
+		return (GPG_ERR_CORRUPTED_PROTECTION);
+
+	s += n;
+	s++; /* skip list end */
+
+	n = snext (&s);
+	if (is_ocb) {
+		if (n != 12) /* Wrong size of the nonce. */
+			return (GPG_ERR_CORRUPTED_PROTECTION);
+	} else {
+		if (n != 16) /* Wrong blocksize for IV (we support only 128 bit). */
+			return (GPG_ERR_CORRUPTED_PROTECTION);
+	}
+	iv = s;
+	s += n;
+	if (*s != ')' )
+		return (GPG_ERR_INV_SEXP);
+	s++;
+	n = snext (&s);
+	if (!n)
+		return (GPG_ERR_INV_SEXP);
+
+	if (is_ocb) {
+		fprintf(stderr, "openpgp-s2k3-ocb-aes is not supported yet!\n");
+		return;
+	}
+
+	cleartext = NULL; /* Avoid cc warning. */
+	rc = do_decryption_hacked(aad_begin, aad_end - aad_begin,
+			aadhole_begin, aadhole_end - aadhole_begin, s, n,
+			s2ksalt, s2kcount, iv, is_ocb? 12:16,
+			prot_cipher, prot_cipher_keylen, is_ocb, &cleartext);
+	if (rc)
+		return rc;
+
+	return 0;
+}
+
+/*
+ * Code for handling GnuPG 2.x key format ends here
+ */
+
 int gpg2john(int argc, char **argv)
 {
 	int i;
@@ -360,10 +766,18 @@ int gpg2john(int argc, char **argv)
 		if (!fp) continue;
 		jtr_fseek64(fp, 0, SEEK_END);
 		m_flen = (size_t)jtr_ftell64(fp);
-		fclose(fp);
-		hash = mem_alloc( (m_flen+256) << 1);
+		hash = mem_alloc((m_flen+256) << 1);
 		if (freopen(filename, "rb", stdin) == NULL)
 			warn_exit("can't open %s.", filename);
+		// hack to detect GnuPG 2.x protected private key format files
+		jtr_fseek64(fp, 0, SEEK_SET);
+		fread(hash, m_flen, 1, fp);
+		if (strstr(hash, "21:protected-private-key")) {
+			agent_unprotect_parser(hash);
+			continue;
+		}
+		fclose(fp);
+		memset(hash, 0, (m_flen+256) << 1);
 		parse_packet(hash);
 		if (last_hash && *last_hash) {
 			char login[4096], *cp;
