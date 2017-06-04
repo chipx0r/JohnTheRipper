@@ -244,43 +244,6 @@ static void decrypt_aes_cbc_essiv(unsigned char *src, unsigned char *dst,
 	}
 }
 
-static int hash_plugin_parse_hash(char *filename, unsigned char **cp, int afsize, int is_critical)
-{
-	FILE *myfile;
-	int readbytes;
-
-	myfile = jtr_fopen(filename, "rb");
-
-	if (!myfile) {
-		fprintf(stderr, "\n%s : %s!\n", filename, strerror(errno));
-		return -1;
-	}
-
-	// can this go over 4gb?
-	*cp =(unsigned char*) mem_calloc(1, afsize + 1);
-	if (!*cp)
-		goto bad;
-	// printf(">>> %d\n", cs->afsize);
-	readbytes = fread(*cp, afsize, 1, myfile);
-
-	if (readbytes < 0) {
-		fprintf(stderr, "%s : unable to read required data\n",
-			filename);
-		goto bad;
-	}
-	fclose(myfile);
-	return afsize+1;
-
-bad:
-	fclose(myfile);
-	if (is_critical) {
-		fprintf(stderr, "\nLUKS plug-in is unable to continue due to errors!\n");
-		error();
-	}
-	return -1;
-}
-
-
 static char (*saved_key)[PLAINTEXT_LENGTH + 1];
 static uint32_t (*crypt_out)[BINARY_SIZE / sizeof(uint32_t)];
 
@@ -334,8 +297,7 @@ static int valid(char *ciphertext, struct fmt_main *self)
 {
 	char *ctcopy;
 	char *keeptr;
-	char *p, *q;
-	unsigned char *buf;
+	char *p;
 	int is_inlined, i, bestslot=0;
 	int res;
 	int afsize;
@@ -355,7 +317,8 @@ static int valid(char *ciphertext, struct fmt_main *self)
 	if (!isdec(p))
 		goto err;
 	is_inlined = atoi(p);
-
+	if (!is_inlined) /* only inlined hashes are supported now */
+		goto err;
 	if ((p = strtokm(NULL, "$")) == NULL)
 		goto err;
 	if (!isdec(p))
@@ -405,25 +368,6 @@ static int valid(char *ciphertext, struct fmt_main *self)
 		if (!ishexlc(p))
 			goto err;
 	}
-	else {
-		if ((p = strtokm(NULL, "$")) == NULL)	/* LUKS file */
-			goto err;
-		if ((p = strtokm(NULL, "$")) == NULL)	/* dump file */
-			goto err;
-		q = p;
-		if ((p = strtokm(NULL, "$")) == NULL)	/* mkDigest */
-			goto err;
-		if (strlen(p) != LUKS_DIGESTSIZE * 2)
-			goto err;
-		if (!ishexlc(p))
-			goto err;
-
-		/* more tests */
-		if (hash_plugin_parse_hash(q, &buf, afsize, 0) == -1) {
-			return 0;
-		}
-		MEM_FREE(buf);
-	}
 
 	MEM_FREE(keeptr);
 	return 1;
@@ -442,7 +386,7 @@ static void *get_salt(char *ciphertext)
 	int i;
 	int cnt;
 	unsigned char *out;
-	unsigned char *buf;
+	unsigned char *buf = NULL;
 	struct custom_salt_LUKS cs, *psalt;
 	static unsigned char *ptr;
 	unsigned int bestiter = 0xFFFFFFFF;
@@ -476,13 +420,6 @@ static void *get_salt(char *ciphertext)
 		buf = mem_calloc(1, size+4);
 		base64_decode(p, strlen(p), (char*)buf);
 		cs.afsize = size;
-	}
-	else {
-		cs.afsize = res;
-		p = strtokm(NULL, "$");
-		p = strtokm(NULL, "$");
-		strcpy(cs.path, p);
-		size = hash_plugin_parse_hash(cs.path, &buf, cs.afsize, 1);
 	}
 	for (cnt = 0; cnt < LUKS_NUMKEYS; cnt++) {
 			if ((john_ntohl(cs.myphdr.keyblock[cnt].passwordIterations) < bestiter)

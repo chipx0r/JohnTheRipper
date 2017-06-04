@@ -112,7 +112,7 @@ def process_file(filename):
     if bestslot == 2000:
         return -6
 
-    afsize = af_sectors(keyBytes, stripes)
+    afsize = af_sectors(keyBytes, stripes)  # AFEKSize in LUKS_open_key() in cryptsetup
     (active, passwordIterations,
      passwordSalt, keyMaterialOffset, stripes) = bestdata
 
