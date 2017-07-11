@@ -439,8 +439,9 @@ int dmg2john(int argc, char **argv)
 		puts("Usage: dmg2john [DMG files]");
 		return -1;
 	}
-	for (i = 1; i < argc; i++)
-		hash_plugin_parse_hash(argv[i]);
+	for (i = 1; i < 10000; i++)
+		hash_plugin_parse_hash(argv[1]);
+		// hash_plugin_parse_hash(argv[i]);
 
 	return 0;
 }
