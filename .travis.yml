@@ -64,3 +64,14 @@ addons:
     build_command_prepend:
     build_command: "cd src && ./configure && make -sj4 && echo -e '[Disabled:Formats]\nRaw-SHA512-free-opencl = Y\nXSHA512-free-opencl = Y' > john-local.conf && ../run/john -test-full=0"
     branch_pattern: coverity_scan
+
+deploy:
+  provider: releases
+  api_key:
+    secure: "PlzkK1BzbYvzYMNiX3MJ1gaR15RuYBzu3utT50CDI9NMwk7mFQjLHA4yfOyEYrlQAdX1aZIGWFnqH8OX4MLxw/1fdznoTZ1t1KLVKZgOKyKfOrnROcRB+jYTZAljaCBeJZewUGXzcwBnQlkCk1UhE9UP2oMHOUV+M1+0nN25yM8="
+  file: JtR-macOS.7z
+  # file: JtR-macOS.zip
+  skip_cleanup: true
+  on:
+    tags: true
+    condition:  "\"$TRAVIS_OS_NAME\" == \"osx\""
