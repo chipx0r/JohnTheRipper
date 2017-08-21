@@ -2,6 +2,7 @@
 
 if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then
     # brew install --force openssl
+    brew install p7zip
     cd src
 
     # Build with AVX
@@ -32,7 +33,8 @@ if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then
     rm -rf run/ztex
 
     echo "These macOS Sierra builds require OpenSSL and GMP. To install these dependencies, run 'brew install --force openssl gmp' command." > README-macOS.txt
-    zip -y -r JtR-macOS.zip run/ doc/ README.md README README-jumbo README-macOS.txt
+    # zip -y -r JtR-macOS.zip run/ doc/ README.md README README-jumbo README-macOS.txt
+    7z a JtR-macOS.7z run/ doc/ README.md README README-jumbo README-macOS.txt
 
 elif [[ -z "$TEST" ]]; then
     cd src
