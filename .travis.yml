@@ -69,7 +69,8 @@ deploy:
   provider: releases
   api_key:
     secure: "PlzkK1BzbYvzYMNiX3MJ1gaR15RuYBzu3utT50CDI9NMwk7mFQjLHA4yfOyEYrlQAdX1aZIGWFnqH8OX4MLxw/1fdznoTZ1t1KLVKZgOKyKfOrnROcRB+jYTZAljaCBeJZewUGXzcwBnQlkCk1UhE9UP2oMHOUV+M1+0nN25yM8="
-  file: JtR-macOS.zip
+  file: JtR-macOS.7z
+  # file: JtR-macOS.zip
   skip_cleanup: true
   on:
     tags: true
