@@ -7,19 +7,19 @@ if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then
 
     # Build with AVX
     ./configure --disable-native-tests CPPFLAGS='-mavx -I/usr/local/opt/openssl/include -DCPU_FALLBACK -DCPU_FALLBACK_BINARY="\"john-sse4.1\""' LDFLAGS="-L/usr/local/opt/openssl/lib"
-    make -sj4
+    make -sj4 strip
     mv ../run/john ../run/john-avx
     make clean; make distclean
 
     # Build with AVX2
     ./configure --disable-native-tests CPPFLAGS='-mavx2 -I/usr/local/opt/openssl/include -DCPU_FALLBACK -DCPU_FALLBACK_BINARY="\"john-avx\""' LDFLAGS="-L/usr/local/opt/openssl/lib"
-    make -sj4
+    make -sj4 strip
     mv ../run/john ../run/john-avx2
     make clean; make distclean
 
     # Build with SSE4.1 ("widely" compatible binary)
     ./configure --disable-native-tests CPPFLAGS='-I/usr/local/opt/openssl/include' LDFLAGS="-L/usr/local/opt/openssl/lib"
-    make -sj4
+    make -sj4 strip
     mv ../run/john ../run/john-sse4.1
 
     mv ../run/john-avx2 ../run/john  # call the most feature-rich binary 'john'
